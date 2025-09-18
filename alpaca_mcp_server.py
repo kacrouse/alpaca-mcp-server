@@ -1168,12 +1168,12 @@ async def place_stock_order(
     ctx: Context,
     order_type: str = "market",
     time_in_force: str = "day",
-    limit_price: float = None,
-    stop_price: float = None,
-    trail_price: float = None,
-    trail_percent: float = None,
-    extended_hours: bool = False,
-    client_order_id: str = None
+    limit_price: Optional[float] = None,
+    stop_price: Optional[float] = None,
+    trail_price: Optional[float] = None,
+    trail_percent: Optional[float] = None,
+    extended_hours: Optional[bool] = False,
+    client_order_id: Optional[str] = None
 ) -> str:
     """
     Places an order of any supported type (MARKET, LIMIT, STOP, STOP_LIMIT, TRAILING_STOP) using the correct Alpaca request class.
