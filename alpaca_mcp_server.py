@@ -62,7 +62,7 @@ from alpaca.trading.requests import (
     UpdateWatchlistRequest,
 )
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import FastMCP, Context
 
 # Configure Python path for local imports
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -85,6 +85,79 @@ def detect_pycharm_environment():
     """
     mcp_client = os.getenv("MCP_CLIENT", "").lower()
     return mcp_client == "pycharm"
+
+
+def get_credentials(ctx: Context):
+    """
+    Retrieve Alpaca API credentials based on the current context.
+
+    If running in HTTP mode, expect credentials in environment variables
+    or in the Authorization header as a Bearer token. Fail if environment
+    variables are set and a Bearer token is also provided.
+
+    In all other modes, expect credentials in environment variables.
+    
+    Returns:
+        Tuple[str, str]: A tuple containing the API key and secret.
+    """
+    if args.transport == "http":
+        # In HTTP mode, check for credentials in Authorization header first
+        try:
+            headers = (ctx.request_context.request.headers or {})
+            auth_header = headers.get("authorization", "")
+            if auth_header.startswith("Bearer "):
+                # Format is "Bearer {alpaca key}:{alpaca secret}"
+                token = auth_header[7:]  # Remove "Bearer " prefix
+                if ":" in token:
+                    api_key, api_secret = token.split(":", 1)
+                    if api_key and api_secret:
+                        if TRADE_API_KEY or TRADE_API_SECRET:
+                            raise ValueError("Ambiguous Alpaca API credentials: found both environment variables and Bearer token.")
+                        print(f"Using API credentials from Bearer token")
+                        return api_key, api_secret
+        except (RuntimeError, AttributeError, ValueError) as e:
+            # Not in a request context, no headers available, or token format error
+            print(f"Error occurred while extracting Bearer token: {e}")
+            pass
+
+        # Fallback to environment variables
+        if TRADE_API_KEY and TRADE_API_SECRET:
+            return TRADE_API_KEY, TRADE_API_SECRET
+
+        raise ValueError("Alpaca API credentials not found in Authorization header or environment variables.")
+    else:
+        # In non-HTTP modes, expect credentials in environment variables
+        if TRADE_API_KEY and TRADE_API_SECRET:
+            return TRADE_API_KEY, TRADE_API_SECRET
+
+        raise ValueError("Alpaca API credentials not found in environment variables.")
+
+
+# Client getter functions
+def get_trading_client(ctx: Context):
+    api_key, api_secret = get_credentials(ctx)
+    paper = ALPACA_PAPER_TRADE.lower() not in ['false', '0', 'no', 'off']
+    return TradingClientSigned(api_key, api_secret, paper=paper)
+
+def get_stock_historical_client(ctx: Context):
+    api_key, api_secret = get_credentials(ctx)
+    return StockHistoricalDataClientSigned(api_key, api_secret)
+
+def get_option_historical_client(ctx: Context):
+    api_key, api_secret = get_credentials(ctx)
+    return OptionHistoricalDataClientSigned(api_key, api_secret)
+
+def get_corporate_actions_client(ctx: Context):
+    api_key, api_secret = get_credentials(ctx)
+    return CorporateActionsClientSigned(api_key=api_key, secret_key=api_secret)
+
+def get_crypto_historical_client(ctx: Context):
+    api_key, api_secret = get_credentials(ctx)
+    return CryptoHistoricalDataClientSigned(api_key=api_key, secret_key=api_secret)
+
+def get_stock_data_stream_client(ctx: Context):
+    api_key, api_secret = get_credentials(ctx)
+    return StockDataStream(api_key, api_secret, url_override=STREAM_DATA_WSS)
 
 def parse_arguments():
     """Parse command line arguments for transport configuration."""
@@ -163,27 +236,6 @@ if not is_pycharm and __name__ == "__main__":
 mcp = FastMCP("alpaca-trading", log_level=log_level)
 
 
-# Check if keys are available
-if not TRADE_API_KEY or not TRADE_API_SECRET:
-    raise ValueError("Alpaca API credentials not found in environment variables.")
-
-# Convert string to boolean
-ALPACA_PAPER_TRADE_BOOL = ALPACA_PAPER_TRADE.lower() not in ['false', '0', 'no', 'off']
-
-# Initialize clients
-# For trading
-trade_client = TradingClientSigned(TRADE_API_KEY, TRADE_API_SECRET, paper=ALPACA_PAPER_TRADE_BOOL)
-# For historical market data
-stock_historical_data_client = StockHistoricalDataClientSigned(TRADE_API_KEY, TRADE_API_SECRET)
-# For streaming market data
-stock_data_stream_client = StockDataStream(TRADE_API_KEY, TRADE_API_SECRET, url_override=STREAM_DATA_WSS)
-# For option historical data
-option_historical_data_client = OptionHistoricalDataClientSigned(api_key=TRADE_API_KEY, secret_key=TRADE_API_SECRET)
-# For corporate actions data
-corporate_actions_client = CorporateActionsClientSigned(api_key=TRADE_API_KEY, secret_key=TRADE_API_SECRET)
-# For crypto historical data
-crypto_historical_data_client = CryptoHistoricalDataClientSigned(api_key=TRADE_API_KEY, secret_key=TRADE_API_SECRET)
-
 # ----------------------------------------------------------------------------
 # Centralized date parsing helpers
 # ----------------------------------------------------------------------------
@@ -232,7 +284,7 @@ def _month_name_to_number(name: str) -> int:
 # ============================================================================
 
 @mcp.tool()
-async def get_account_info() -> str:
+async def get_account_info(ctx: Context) -> str:
     """
     Retrieves and formats the current account information including balances and status.
     
@@ -249,7 +301,7 @@ async def get_account_info() -> str:
             - Pattern Day Trader Status
             - Day Trades Remaining
     """
-    account = trade_client.get_account()
+    account = get_trading_client(ctx).get_account()
     
     info = f"""
             Account Information:
@@ -269,7 +321,7 @@ async def get_account_info() -> str:
     return info
 
 @mcp.tool()
-async def get_positions() -> str:
+async def get_positions(ctx: Context) -> str:
     """
     Retrieves and formats all current positions in the portfolio.
     
@@ -282,7 +334,7 @@ async def get_positions() -> str:
             - Current Price
             - Unrealized P/L
     """
-    positions = trade_client.get_all_positions()
+    positions = get_trading_client(ctx).get_all_positions()
     
     if not positions:
         return "No open positions found."
@@ -301,7 +353,7 @@ async def get_positions() -> str:
     return result
 
 @mcp.tool()
-async def get_open_position(symbol: str) -> str:
+async def get_open_position(symbol: str, ctx: Context) -> str:
     """
     Retrieves and formats details for a specific open position.
     
@@ -312,7 +364,7 @@ async def get_open_position(symbol: str) -> str:
         str: Formatted string containing the position details or an error message
     """
     try:
-        position = trade_client.get_open_position(symbol)
+        position = get_trading_client(ctx).get_open_position(symbol)
         
         # Check if it's an options position by looking for the options symbol pattern
         is_option = len(symbol) > 6 and any(c in symbol for c in ['C', 'P'])
@@ -337,7 +389,7 @@ async def get_open_position(symbol: str) -> str:
 # ============================================================================
 
 @mcp.tool()
-async def get_stock_quote(symbol: str) -> str:
+async def get_stock_quote(symbol: str, ctx: Context) -> str:
     """
     Retrieves and formats the latest quote for a stock.
     
@@ -354,7 +406,7 @@ async def get_stock_quote(symbol: str) -> str:
     """
     try:
         request_params = StockLatestQuoteRequest(symbol_or_symbols=symbol)
-        quotes = stock_historical_data_client.get_stock_latest_quote(request_params)
+        quotes = get_stock_historical_client(ctx).get_stock_latest_quote(request_params)
         
         if symbol in quotes:
             quote = quotes[symbol]
@@ -375,11 +427,12 @@ async def get_stock_quote(symbol: str) -> str:
 @mcp.tool()
 async def get_stock_bars(
     symbol: str, 
+    ctx: Context,
     days: int = 5, 
     timeframe: str = "1Day",
     limit: Optional[int] = None,
     start: Optional[str] = None,
-    end: Optional[str] = None
+    end: Optional[str] = None,
 ) -> str:
     """
     Retrieves and formats historical price bars for a stock with configurable timeframe and time range.
@@ -440,14 +493,14 @@ async def get_stock_bars(
             end_time = datetime.now()
         
         request_params = StockBarsRequest(
-            symbol_or_symbols=symbol,
+            symbol_or_symbols=symbol,   
             timeframe=timeframe_obj,
             start=start_time,
             end=end_time,
             limit=limit
         )
         
-        bars = stock_historical_data_client.get_stock_bars(request_params)
+        bars = get_stock_historical_client(ctx).get_stock_bars(request_params)
         
         if bars[symbol]:
             time_range = f"{start_time.strftime('%Y-%m-%d %H:%M')} to {end_time.strftime('%Y-%m-%d %H:%M')}"
@@ -472,6 +525,7 @@ async def get_stock_bars(
 @mcp.tool()
 async def get_stock_trades(
     symbol: str,
+    ctx: Context,
     days: int = 5,
     limit: Optional[int] = None,
     sort: Optional[Sort] = Sort.ASC,
@@ -511,7 +565,7 @@ async def get_stock_trades(
         )
         
         # Get the trades
-        trades = stock_historical_data_client.get_stock_trades(request_params)
+        trades = get_stock_historical_client(ctx).get_stock_trades(request_params)
         
         if symbol in trades:
             result = f"Historical Trades for {symbol} (Last {days} days):\n"
@@ -536,6 +590,7 @@ async def get_stock_trades(
 @mcp.tool()
 async def get_stock_latest_trade(
     symbol: str,
+    ctx: Context,
     feed: Optional[DataFeed] = None,
     currency: Optional[SupportedCurrencies] = None
 ) -> str:
@@ -558,7 +613,7 @@ async def get_stock_latest_trade(
         )
         
         # Get the latest trade
-        latest_trades = stock_historical_data_client.get_stock_latest_trade(request_params)
+        latest_trades = get_stock_historical_client(ctx).get_stock_latest_trade(request_params)
         
         if symbol in latest_trades:
             trade = latest_trades[symbol]
@@ -580,6 +635,7 @@ async def get_stock_latest_trade(
 @mcp.tool()
 async def get_stock_latest_bar(
     symbol: str,
+    ctx: Context,
     feed: Optional[DataFeed] = None,
     currency: Optional[SupportedCurrencies] = None
 ) -> str:
@@ -602,7 +658,7 @@ async def get_stock_latest_bar(
         )
         
         # Get the latest bar
-        latest_bars = stock_historical_data_client.get_stock_latest_bar(request_params)
+        latest_bars = get_stock_historical_client(ctx).get_stock_latest_bar(request_params)
         
         if symbol in latest_bars:
             bar = latest_bars[symbol]
@@ -674,6 +730,7 @@ def _format_trade_data(trade) -> str:
 @mcp.tool()
 async def get_stock_snapshot(
     symbol_or_symbols: Union[str, List[str]], 
+    ctx: Context,
     feed: Optional[DataFeed] = None,
     currency: Optional[SupportedCurrencies] = None
 ) -> str:
@@ -696,7 +753,7 @@ async def get_stock_snapshot(
     try:
         # Create and execute request
         request = StockSnapshotRequest(symbol_or_symbols=symbol_or_symbols, feed=feed, currency=currency)
-        snapshots = stock_historical_data_client.get_stock_snapshot(request)
+        snapshots = get_stock_historical_client(ctx).get_stock_snapshot(request)
         
         # Format response
         symbols = [symbol_or_symbols] if isinstance(symbol_or_symbols, str) else symbol_or_symbols
@@ -755,6 +812,7 @@ async def get_stock_snapshot(
 @mcp.tool()
 async def get_crypto_bars(
     symbol: Union[str, List[str]], 
+    ctx: Context,
     days: int = 1, 
     timeframe: str = "1Hour",
     limit: Optional[int] = None,
@@ -836,9 +894,9 @@ async def get_crypto_bars(
             end=end_time,
             limit=limit
         )
-        
-        bars = crypto_historical_data_client.get_crypto_bars(request_params, feed=feed)
-        
+
+        bars = get_crypto_historical_client(ctx).get_crypto_bars(request_params, feed=feed)
+
         if bars[symbol]:
             time_range = f"{start_time.strftime('%Y-%m-%d %H:%M')} to {end_time.strftime('%Y-%m-%d %H:%M')}"
             result = f"Historical Crypto Data for {symbol} ({timeframe} bars, {time_range}):\n"
@@ -862,6 +920,7 @@ async def get_crypto_bars(
 @mcp.tool()
 async def get_crypto_quotes(
     symbol: Union[str, List[str]],
+    ctx: Context,
     days: int = 3,
     limit: Optional[int] = None,
     start: Optional[str] = None,
@@ -911,9 +970,9 @@ async def get_crypto_quotes(
             end=end_time,
             limit=limit
         )
-        
-        quotes = crypto_historical_data_client.get_crypto_quotes(request_params, feed=feed)
-        
+
+        quotes = get_crypto_historical_client(ctx).get_crypto_quotes(request_params, feed=feed)
+
         # Use the exact same simple pattern as crypto bars
         if quotes[symbol]:
             time_range = f"{start_time.strftime('%Y-%m-%d %H:%M')} to {end_time.strftime('%Y-%m-%d %H:%M')}"
@@ -936,6 +995,7 @@ async def get_crypto_quotes(
 
 @mcp.tool()
 async def get_orders(
+    ctx: Context,
     status: str = "all", 
     limit: int = 10,
     after: Optional[str] = None,
@@ -1023,7 +1083,7 @@ async def get_orders(
             symbols=symbols
         )
         
-        orders = trade_client.get_orders(request_params)
+        orders = get_trading_client(ctx).get_orders(request_params)
         
         if not orders:
             return f"No {status} orders found."
@@ -1105,6 +1165,7 @@ async def place_stock_order(
     symbol: str,
     side: str,
     quantity: float,
+    ctx: Context,
     order_type: str = "market",
     time_in_force: str = "day",
     limit_price: float = None,
@@ -1237,7 +1298,7 @@ async def place_stock_order(
             return f"Invalid order type: {order_type}. Must be one of: MARKET, LIMIT, STOP, STOP_LIMIT, TRAILING_STOP."
 
         # Submit order
-        order = trade_client.submit_order(order_data)
+        order = get_trading_client(ctx).submit_order(order_data)
         return f"""
                 Stock Order Placed Successfully:
                 --------------------------------
@@ -1284,6 +1345,7 @@ async def place_stock_order(
 async def place_crypto_order(
     symbol: str,
     side: str,
+    ctx: Context,
     order_type: str = "market",
     time_in_force: Union[str, TimeInForce] = "gtc",
     qty: Optional[float] = None,
@@ -1381,7 +1443,7 @@ async def place_crypto_order(
         else:
             return "Invalid order type for crypto. Use: market, limit, stop_limit."
 
-        order = trade_client.submit_order(order_data)
+        order = get_trading_client(ctx).submit_order(order_data)
 
         return f"""
                 Crypto Order Placed Successfully:
@@ -1426,7 +1488,7 @@ async def place_crypto_order(
         return f"Error placing crypto order: {str(e)}"
 
 @mcp.tool()
-async def cancel_all_orders() -> str:
+async def cancel_all_orders(ctx: Context) -> str:
     """
     Cancel all open orders.
     
@@ -1435,8 +1497,7 @@ async def cancel_all_orders() -> str:
     """
     try:
         # Cancel all orders
-        cancel_responses = trade_client.cancel_orders()
-        
+        cancel_responses = get_trading_client(ctx).cancel_orders()
         if not cancel_responses:
             return "No orders were found to cancel."
         
@@ -1458,7 +1519,7 @@ async def cancel_all_orders() -> str:
         return f"Error cancelling orders: {str(e)}"
 
 @mcp.tool()
-async def cancel_order_by_id(order_id: str) -> str:
+async def cancel_order_by_id(order_id: str, ctx: Context) -> str:
     """
     Cancel a specific order by its ID.
     
@@ -1470,18 +1531,18 @@ async def cancel_order_by_id(order_id: str) -> str:
     """
     try:
         # Cancel the specific order
-        response = trade_client.cancel_order_by_id(order_id)
+        response = get_trading_client(ctx).cancel_order_by_id(order_id)
         
         # Format the response
-        status = "Success" if response.status == 200 else "Failed"
+        status = "Success" if response == None or response.status == 200 else "Failed"
         result = f"""
         Order Cancellation Result:
         ------------------------
-        Order ID: {response.id}
+        Order ID: {order_id}
         Status: {status}
         """
         
-        if response.body:
+        if response is not None and response.body:
             result += f"Details: {response.body}\n"
             
         return result
@@ -1495,7 +1556,7 @@ async def cancel_order_by_id(order_id: str) -> str:
 # =======================================================================================
 
 @mcp.tool()
-async def close_position(symbol: str, qty: Optional[str] = None, percentage: Optional[str] = None) -> str:
+async def close_position(symbol: str, ctx: Context, qty: Optional[str] = None, percentage: Optional[str] = None) -> str:
     """
     Closes a specific position for a single symbol. 
     This method will throw an error if the position does not exist!
@@ -1518,7 +1579,7 @@ async def close_position(symbol: str, qty: Optional[str] = None, percentage: Opt
             )
         
         # Close the position
-        order = trade_client.close_position(symbol, close_options)
+        order = get_trading_client(ctx).close_position(symbol, close_options)
         
         return f"""
                 Position Closed Successfully:
@@ -1545,9 +1606,9 @@ async def close_position(symbol: str, qty: Optional[str] = None, percentage: Opt
             
     except Exception as e:
         return f"Error closing position: {str(e)}"
-    
+
 @mcp.tool()
-async def close_all_positions(cancel_orders: bool = False) -> str:
+async def close_all_positions(ctx: Context, cancel_orders: bool = False) -> str:
     """
     Closes all open positions.
     
@@ -1559,7 +1620,7 @@ async def close_all_positions(cancel_orders: bool = False) -> str:
     """
     try:
         # Close all positions
-        close_responses = trade_client.close_all_positions(cancel_orders=cancel_orders)
+        close_responses = get_trading_client(ctx).close_all_positions(cancel_orders=cancel_orders)
         
         if not close_responses:
             return "No positions were found to close."
@@ -1582,7 +1643,7 @@ async def close_all_positions(cancel_orders: bool = False) -> str:
 
 # Position Management Tools (Options)
 @mcp.tool()
-async def exercise_options_position(symbol_or_contract_id: str) -> str:
+async def exercise_options_position(symbol_or_contract_id: str, ctx: Context) -> str:
     """
     Exercises a held option contract, converting it into the underlying asset.
     
@@ -1593,7 +1654,7 @@ async def exercise_options_position(symbol_or_contract_id: str) -> str:
         str: Success message or error details
     """
     try:
-        trade_client.exercise_options_position(symbol_or_contract_id=symbol_or_contract_id)
+        get_trading_client(ctx).exercise_options_position(symbol_or_contract_id=symbol_or_contract_id)
         return f"Successfully submitted exercise request for option contract: {symbol_or_contract_id}"
     except Exception as e:
         return f"Error exercising option contract '{symbol_or_contract_id}': {str(e)}"
@@ -1604,7 +1665,7 @@ async def exercise_options_position(symbol_or_contract_id: str) -> str:
 # ============================================================================
 
 @mcp.tool()
-async def get_asset_info(symbol: str) -> str:
+async def get_asset_info(symbol: str, ctx: Context) -> str:
     """
     Retrieves and formats detailed information about a specific asset.
     
@@ -1620,7 +1681,7 @@ async def get_asset_info(symbol: str) -> str:
             - Trading Properties
     """
     try:
-        asset = trade_client.get_asset(symbol)
+        asset = get_trading_client(ctx).get_asset(symbol)
         return f"""
                 Asset Information for {symbol}:
                 ----------------------------
@@ -1639,6 +1700,7 @@ async def get_asset_info(symbol: str) -> str:
 
 @mcp.tool()
 async def get_all_assets(
+    ctx: Context,
     status: Optional[str] = None,
     asset_class: Optional[str] = None,
     exchange: Optional[str] = None,
@@ -1665,7 +1727,7 @@ async def get_all_assets(
             )
         
         # Get all assets
-        assets = trade_client.get_all_assets(filter_params)
+        assets = get_trading_client(ctx).get_all_assets(filter_params)
         
         if not assets:
             return "No assets found matching the criteria."
@@ -1693,7 +1755,7 @@ async def get_all_assets(
 # ============================================================================
 
 @mcp.tool()
-async def create_watchlist(name: str, symbols: List[str]) -> str:
+async def create_watchlist(name: str, symbols: List[str], ctx: Context) -> str:
     """
     Creates a new watchlist with specified symbols.
     
@@ -1706,16 +1768,16 @@ async def create_watchlist(name: str, symbols: List[str]) -> str:
     """
     try:
         watchlist_data = CreateWatchlistRequest(name=name, symbols=symbols)
-        watchlist = trade_client.create_watchlist(watchlist_data)
+        watchlist = get_trading_client(ctx).create_watchlist(watchlist_data)
         return f"Watchlist '{name}' created successfully with {len(symbols)} symbols."
     except Exception as e:
         return f"Error creating watchlist: {str(e)}"
 
 @mcp.tool()
-async def get_watchlists() -> str:
+async def get_watchlists(ctx: Context) -> str:
     """Get all watchlists for the account."""
     try:
-        watchlists = trade_client.get_watchlists()
+        watchlists = get_trading_client(ctx).get_watchlists()
         result = "Watchlists:\n------------\n"
         for wl in watchlists:
             result += f"Name: {wl.name}\n"
@@ -1729,11 +1791,11 @@ async def get_watchlists() -> str:
         return f"Error fetching watchlists: {str(e)}"
 
 @mcp.tool()
-async def update_watchlist(watchlist_id: str, name: str = None, symbols: List[str] = None) -> str:
+async def update_watchlist(watchlist_id: str, ctx: Context, name: str = None, symbols: List[str] = None) -> str:
     """Update an existing watchlist."""
     try:
         update_request = UpdateWatchlistRequest(name=name, symbols=symbols)
-        watchlist = trade_client.update_watchlist_by_id(watchlist_id, update_request)
+        watchlist = get_trading_client(ctx).update_watchlist_by_id(watchlist_id, update_request)
         return f"Watchlist updated successfully: {watchlist.name}"
     except Exception as e:
         return f"Error updating watchlist: {str(e)}"
@@ -1743,7 +1805,7 @@ async def update_watchlist(watchlist_id: str, name: str = None, symbols: List[st
 # ============================================================================
 
 @mcp.tool()
-async def get_market_clock() -> str:
+async def get_market_clock(ctx: Context) -> str:
     """
     Retrieves and formats current market status and next open/close times.
     
@@ -1755,7 +1817,7 @@ async def get_market_clock() -> str:
             - Next Close Time
     """
     try:
-        clock = trade_client.get_clock()
+        clock = get_trading_client(ctx).get_clock()
         return f"""
                 Market Status:
                 -------------
@@ -1768,7 +1830,7 @@ async def get_market_clock() -> str:
         return f"Error fetching market clock: {str(e)}"
 
 @mcp.tool()
-async def get_market_calendar(start_date: str, end_date: str) -> str:
+async def get_market_calendar(start_date: str, end_date: str, ctx: Context) -> str:
     """
     Retrieves and formats market calendar for specified date range.
     
@@ -1786,7 +1848,7 @@ async def get_market_calendar(start_date: str, end_date: str) -> str:
         
         # Create the request object with the correct parameters
         calendar_request = GetCalendarRequest(start=start_dt, end=end_dt)
-        calendar = trade_client.get_calendar(calendar_request)
+        calendar = get_trading_client(ctx).get_calendar(calendar_request)
         
         result = f"Market Calendar ({start_date} to {end_date}):\n----------------------------\n"
         for day in calendar:
@@ -1801,6 +1863,7 @@ async def get_market_calendar(start_date: str, end_date: str) -> str:
 
 @mcp.tool()
 async def get_corporate_announcements(
+    ctx: Context,
     ca_types: Optional[List[CorporateActionsType]] = None,
     start: Optional[date] = None,
     end: Optional[date] = None,
@@ -1856,7 +1919,7 @@ async def get_corporate_announcements(
             limit=limit,
             sort=sort
         )
-        announcements = corporate_actions_client.get_corporate_actions(request)
+        announcements = get_corporate_actions_client(ctx).get_corporate_actions(request)
         
         if not announcements or not announcements.data:
             return "No corporate announcements found for the specified criteria."
@@ -2024,6 +2087,7 @@ def _parse_expiration_expression(expression: str) -> Dict[str, Any]:
 @mcp.tool()
 async def get_option_contracts(
     underlying_symbol: str,
+    ctx: Context,
     expiration_date: Optional[date] = None,
     expiration_date_gte: Optional[date] = None,
     expiration_date_lte: Optional[date] = None,
@@ -2083,7 +2147,7 @@ async def get_option_contracts(
         )
         
         # Execute API call
-        response = trade_client.get_option_contracts(request)
+        response = get_trading_client(ctx).get_option_contracts(request)
         
         if not response or not response.option_contracts:
             return f"No option contracts found for {underlying_symbol}."
@@ -2124,6 +2188,7 @@ async def get_option_contracts(
 @mcp.tool()
 async def get_option_latest_quote(
     symbol: str,
+    ctx: Context,
     feed: Optional[OptionsFeed] = None
 ) -> str:
     """
@@ -2156,7 +2221,7 @@ async def get_option_latest_quote(
         )
         
         # Get the latest quote
-        quotes = option_historical_data_client.get_option_latest_quote(request)
+        quotes = get_option_historical_client(ctx).get_option_latest_quote(request)
         
         if symbol in quotes:
             quote = quotes[symbol]
@@ -2181,7 +2246,7 @@ async def get_option_latest_quote(
 
 
 @mcp.tool()
-async def get_option_snapshot(symbol_or_symbols: Union[str, List[str]], feed: Optional[OptionsFeed] = None) -> str:
+async def get_option_snapshot(symbol_or_symbols: Union[str, List[str]], ctx: Context, feed: Optional[OptionsFeed] = None) -> str:
     """
     Retrieves comprehensive snapshots of option contracts including latest trade, quote, implied volatility, and Greeks.
     This endpoint provides a complete view of an option's current market state and theoretical values.
@@ -2222,7 +2287,7 @@ async def get_option_snapshot(symbol_or_symbols: Union[str, List[str]], feed: Op
         )
         
         # Get snapshots
-        snapshots = option_historical_data_client.get_option_snapshot(request)
+        snapshots = get_option_historical_client(ctx).get_option_snapshot(request)
         
         # Format the response
         result = "Option Snapshots:\n"
@@ -2596,6 +2661,7 @@ def _handle_option_api_error(error_message: str, order_legs: List[OptionLegReque
 @mcp.tool()
 async def place_option_market_order(
     legs: List[Dict[str, Any]],
+    ctx: Context,
     order_class: Optional[Union[str, OrderClass]] = None,
     quantity: int = 1,
     time_in_force: Union[str, TimeInForce] = "day",
@@ -2686,7 +2752,7 @@ async def place_option_market_order(
         )
         
         # Submit order
-        order = trade_client.submit_order(order_data)
+        order = get_trading_client(ctx).submit_order(order_data)
         
         # Format and return response
         return _format_option_order_response(order, order_class, order_legs)
@@ -2834,21 +2900,33 @@ def _validate_amount(amount: int, unit: TimeFrameUnit) -> bool:
 if __name__ == "__main__":
     # Parse command line arguments when running as main script
     args = parse_arguments()
-    
+
     # Setup transport configuration based on command line arguments
     transport_config = setup_transport_config(args)
-    
+
     try:
         # Run server with the specified transport
         if args.transport == "http":
             mcp.settings.host = transport_config["host"]
             mcp.settings.port = transport_config["port"]
+
+            print(f"Starting HTTP server on {transport_config['host']}:{transport_config['port']}")
+            if not TRADE_API_KEY or not TRADE_API_SECRET:
+                print("Warning: No API credentials found in environment variables. " +
+                      "Make sure to provide them via the Authorization header in each request.")
+
             mcp.run(transport="streamable-http")
         elif args.transport == "sse":
+            if not TRADE_API_KEY or not TRADE_API_SECRET:
+                raise ValueError("SSE transport requires Alpaca API credentials in environment variables.")
             mcp.settings.host = transport_config["host"]
             mcp.settings.port = transport_config["port"]
             mcp.run(transport="sse")
         else:
+            if not TRADE_API_KEY or not TRADE_API_SECRET:
+                raise ValueError(
+                    "stdio transport requires Alpaca API credentials in environment variables."
+                )
             mcp.run(transport="stdio")
     except Exception as e:
         if args.transport in ["http", "sse"]:

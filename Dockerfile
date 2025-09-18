@@ -6,4 +6,4 @@ COPY . .
 
 RUN pip install --no-cache-dir -r requirements.txt
 
-CMD ["python", "alpaca_mcp_server.py"]
+CMD ["python", "alpaca_mcp_server.py", "--transport", "http", "--host", "0.0.0.0", "--port", "8080"]

@@ -4,6 +4,9 @@ This is a Model Context Protocol (MCP) server implementation for Alpaca's Tradin
 
 ## Features
 
+- **Multiple Authentication Methods**
+  - Environment variables for local use
+  - HTTP headers for remote API access
 - **Market Data**
   - Real-time quotes, trades, and price bars for stocks
   - Historical data with flexible timeframes (1Min to 1Month)
@@ -45,6 +48,15 @@ This is a Model Context Protocol (MCP) server implementation for Alpaca's Tradin
 - Python (version requirements can be found at: https://modelcontextprotocol.io/quickstart/server)
 - GitHub account
 - Alpaca API keys (with paper or live trading access)
+
+### Authentication Methods
+
+This server supports two methods of authentication:
+
+1. **Environment Variables**: Set up once in your `.env` file (standard method)
+2. **HTTP Headers**: Provide credentials in each request when using HTTP transport mode
+   - Useful for remote access, multiple users, or integrations
+   - See [HTTP_HEADERS.md](HTTP_HEADERS.md) for detailed instructions
 - Claude for Desktop or another compatible MCP client
 
 ### 1. Installation
@@ -129,6 +141,8 @@ python alpaca_mcp_server.py
 ```bash
 python alpaca_mcp_server.py --transport http
 ```
+
+When using HTTP transport mode, you can also provide API credentials via HTTP headers instead of environment variables. See [HTTP_HEADERS.md](HTTP_HEADERS.md) for detailed instructions.
 
 **Available transport options:**
 - `--transport stdio` (default): Standard input/output for local client connections
