@@ -316,7 +316,7 @@ async def get_account_info(ctx: Context) -> str:
             Long Market Value: ${float(account.long_market_value):.2f}
             Short Market Value: ${float(account.short_market_value):.2f}
             Pattern Day Trader: {'Yes' if account.pattern_day_trader else 'No'}
-            Day Trades Remaining: {account.daytrade_count if hasattr(account, 'daytrade_count') else 'Unknown'}
+            Current Day Trade Count: {account.daytrade_count if hasattr(account, 'daytrade_count') else 'Unknown'}{' (Max 3)' if not account.pattern_day_trader else ''}
             """
     return info
 
